@@ -1,7 +1,13 @@
 import httpx
 
-from automatic_annotations.models import ModelSettings
+from automatic_annotations.models import (
+    EdgeTypeDefinition,
+    GraphExtractionSchema,
+    ModelSettings,
+    NodeTypeDefinition,
+)
 from automatic_annotations.providers import OpenAICompatibleProvider
+from automatic_annotations.schema import compile_graph_schema
 
 
 SCHEMA = {
@@ -250,3 +256,36 @@ def test_official_openai_can_use_model_default_reasoning(monkeypatch):
     result = OpenAICompatibleProvider().extract("text", SCHEMA, "", [], model_settings)
     assert result.error is None
     assert "reasoning" not in requests[0]
+
+
+def test_official_openai_request_contains_edge_endpoint_rules(monkeypatch):
+    requests = []
+    graph_schema = compile_graph_schema(GraphExtractionSchema(
+        node_types=[NodeTypeDefinition(name="person"), NodeTypeDefinition(name="organization")],
+        edge_types=[EdgeTypeDefinition(
+            name="works_for", source_types=["person"], target_types=["organization"]
+        )],
+    ))
+
+    def post(url, **kwargs):
+        requests.append(kwargs["json"])
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "status": "completed",
+                "model": "gpt-5.4-mini",
+                "output": [{"type": "message", "content": [{
+                    "type": "output_text", "text": '{"nodes":[],"edges":[]}'
+                }]}],
+                "usage": {},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", post)
+    result = OpenAICompatibleProvider().extract("text", graph_schema, "", [], official_settings())
+    assert result.error is None
+    sent_schema = requests[0]["text"]["format"]["schema"]
+    edge_variant = sent_schema["properties"]["edges"]["items"]["anyOf"][0]
+    assert "Allowed source node types: person" in edge_variant["description"]
+    assert "Allowed target node types: organization" in edge_variant["description"]

@@ -87,3 +87,26 @@ def test_openai_graph_schema_uses_supported_unions_and_enum_discriminators():
     variants = strict["properties"]["nodes"]["items"]["anyOf"]
     assert variants[0]["properties"]["type"] == {"enum": ["person"]}
     assert "oneOf" not in json.dumps(strict)
+
+
+def test_graph_schema_passes_edge_endpoint_rules_to_model():
+    schema = compile_graph_schema(GraphExtractionSchema(
+        node_types=[NodeTypeDefinition(name="person"), NodeTypeDefinition(name="organization")],
+        edge_types=[EdgeTypeDefinition(
+            name="works_for",
+            label="Works for",
+            description="Employment relationship",
+            source_types=["person"],
+            target_types=["organization"],
+        )],
+    ))
+    edge_variant = schema["properties"]["edges"]["items"]["anyOf"][0]
+    assert "Allowed source node types: person" in edge_variant["description"]
+    assert "Allowed target node types: organization" in edge_variant["description"]
+    assert "must have one of these types: person" in edge_variant["properties"]["source"]["description"]
+    assert "must have one of these types: organization" in edge_variant["properties"]["target"]["description"]
+    assert "works_for: source=person; target=organization" in schema["properties"]["edges"]["description"]
+
+    strict = openai_strict_schema(schema)
+    strict_edge = strict["properties"]["edges"]["items"]["anyOf"][0]
+    assert "Allowed source node types: person" in strict_edge["description"]

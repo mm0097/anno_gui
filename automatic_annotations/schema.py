@@ -83,16 +83,24 @@ def _typed_graph_object(
     base_properties: dict[str, Any],
     required: list[str],
     custom_fields: list[AnnotationField],
+    description: str = "",
 ) -> dict[str, Any]:
     properties = dict(base_properties)
     properties["type"] = {"const": type_name}
     properties.update({field.name: _field_schema(field) for field in custom_fields})
-    return {
+    result = {
         "type": "object",
         "properties": properties,
         "required": [*required, "type", *[field.name for field in custom_fields if field.required]],
         "additionalProperties": False,
     }
+    if description:
+        result["description"] = description
+    return result
+
+
+def _type_list_description(values: list[str]) -> str:
+    return ", ".join(values) if values else "any defined node type"
 
 
 def compile_graph_schema(definition: GraphExtractionSchema) -> dict[str, Any]:
@@ -105,32 +113,89 @@ def compile_graph_schema(definition: GraphExtractionSchema) -> dict[str, Any]:
     if definition.include_evidence:
         node_base["evidence"] = {"type": "string", "description": "Supporting source text"}
     node_variants = [
-        _typed_graph_object(item.name, node_base, ["id", "label"], item.properties)
+        _typed_graph_object(
+            item.name,
+            node_base,
+            ["id", "label"],
+            item.properties,
+            description=(
+                f"Node type '{item.name}'"
+                + (f" ({item.label})" if item.label else "")
+                + (f": {item.description}" if item.description else "")
+            ),
+        )
         for item in definition.node_types
     ]
 
     edge_variants = []
     for item in definition.edge_types:
+        allowed_sources = _type_list_description(item.source_types)
+        allowed_targets = _type_list_description(item.target_types)
+        direction = "directed" if item.directed else "undirected"
+        rule = (
+            f"Edge type '{item.name}' is {direction}. "
+            f"Allowed source node types: {allowed_sources}. "
+            f"Allowed target node types: {allowed_targets}."
+        )
+        if item.label:
+            rule += f" Label: {item.label}."
+        if item.description:
+            rule += f" Meaning: {item.description}"
         edge_base: dict[str, Any] = {
-            "source": {"type": "string", "description": "ID of a node in the nodes array"},
-            "target": {"type": "string", "description": "ID of a node in the nodes array"},
+            "source": {
+                "type": "string",
+                "description": (
+                    "ID of an existing node in the nodes array. "
+                    f"For edge type '{item.name}', that node must have one of these types: {allowed_sources}."
+                ),
+            },
+            "target": {
+                "type": "string",
+                "description": (
+                    "ID of an existing node in the nodes array. "
+                    f"For edge type '{item.name}', that node must have one of these types: {allowed_targets}."
+                ),
+            },
         }
         if definition.include_evidence:
             edge_base["evidence"] = {"type": "string", "description": "Text supporting this relation"}
         if definition.include_confidence:
             edge_base["confidence"] = {"type": "number", "minimum": 0, "maximum": 1}
         edge_variants.append(
-            _typed_graph_object(item.name, edge_base, ["source", "target"], item.properties)
+            _typed_graph_object(
+                item.name,
+                edge_base,
+                ["source", "target"],
+                item.properties,
+                description=rule,
+            )
         )
+
+    edge_rules = [
+        (
+            f"{item.name}: source={_type_list_description(item.source_types)}; "
+            f"target={_type_list_description(item.target_types)}; "
+            f"{'directed' if item.directed else 'undirected'}"
+        )
+        for item in definition.edge_types
+    ]
 
     schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "ExtractedGraph",
         "type": "object",
         "properties": {
-            "nodes": {"type": "array", "items": {"anyOf": node_variants}},
+            "nodes": {
+                "type": "array",
+                "description": "Entities found in the text. Every edge endpoint must reference an ID from this array.",
+                "items": {"anyOf": node_variants},
+            },
             "edges": {
                 "type": "array",
+                "description": (
+                    "Relations found in the text. Obey these endpoint type rules exactly: "
+                    + (" | ".join(edge_rules) if edge_rules else "No edges are allowed.")
+                ),
                 "items": {"anyOf": edge_variants} if edge_variants else {
                     "type": "object",
                     "properties": {},
@@ -203,6 +268,7 @@ def build_prompt(
         parts = [
             "Extract a graph from the supplied text.",
             "Identify only nodes and edges supported by the text. Use stable, concise node IDs and reuse those exact IDs in edge source and target fields.",
+            "For every edge, obey the allowed source and target node types stated in that edge type's schema description.",
             "Do not invent missing entities or relations. Return empty arrays when none are present.",
         ]
     else:

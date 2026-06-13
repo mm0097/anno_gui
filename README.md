@@ -35,6 +35,8 @@ uv run streamlit run app.py
 
 OpenAI, Ollama, LM Studio, and vLLM use the `openai_compatible` provider. Official `api.openai.com` requests use the Responses API with strict Structured Outputs and never silently downgrade schema enforcement. For Ollama, for example, use an OpenAI-compatible URL such as `http://localhost:11434/v1`; a key can be left blank. Non-OpenAI servers that reject strict JSON Schema may fall back to JSON-object mode.
 
+Hugging Face Inference Providers use `https://router.huggingface.co/v1/chat/completions` with a Hugging Face token and strict JSON Schema `response_format`. Provider selectors such as `:novita`, `:fastest`, or `:cheapest` are appended to the model name. Structured-output and reasoning-effort availability depend on the selected model/provider combination.
+
 OpenAI reasoning effort defaults to `low` to reduce extraction latency and reasoning-token use. The model screen can select the model default or another supported effort level.
 
 ## Project files

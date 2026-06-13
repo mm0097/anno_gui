@@ -319,15 +319,26 @@ def model_page(current: ProjectStore) -> None:
     config = current.load_config()
     model = config.model
     provider = st.selectbox("Provider", ["openai_compatible", "huggingface"], index=0 if model.provider == "openai_compatible" else 1)
+    default_base = model.api_base
+    default_key_env = model.api_key_env
+    if provider == "huggingface":
+        if not default_base or "api.openai.com" in default_base or "/hf-inference/models" in default_base:
+            default_base = "https://router.huggingface.co/v1"
+        if default_key_env == "OPENAI_API_KEY":
+            default_key_env = "HF_TOKEN"
     col1, col2 = st.columns(2)
     model_name = col1.text_input("Model name", model.model)
-    api_base = col2.text_input("API base URL", model.api_base)
-    if "api.openai.com" in api_base:
+    api_base = col2.text_input("API base URL", default_base)
+    if provider == "huggingface":
+        st.caption("Hugging Face Inference Providers use the OpenAI-compatible router. Provider suffixes such as `:novita`, `:fastest`, and `:cheapest` belong in the model name.")
+        st.caption("Strict JSON Schema structured output is requested. The selected model/provider combination must support structured outputs.")
+    elif "api.openai.com" in api_base:
         st.caption("Official OpenAI requests use the Responses API with strict Structured Outputs. Schema failures are not downgraded to plain JSON mode.")
     else:
         st.caption("OpenAI-compatible endpoints use Chat Completions and fall back to JSON mode only if strict JSON Schema is unsupported.")
-    key_env = st.text_input("API key environment variable", model.api_key_env)
-    st.session_state.api_key = st.text_input("Session-only API key", type="password", value=st.session_state.api_key)
+    key_env = st.text_input("API key environment variable", default_key_env)
+    secret_label = "Session-only Hugging Face token" if provider == "huggingface" else "Session-only API key"
+    st.session_state.api_key = st.text_input(secret_label, type="password", value=st.session_state.api_key)
     col1, col2, col3, col4 = st.columns(4)
     temperature = col1.number_input("Temperature", 0.0, 2.0, model.temperature, 0.1)
     max_tokens = col2.number_input("Max output tokens", 1, 100000, model.max_output_tokens)
@@ -339,7 +350,7 @@ def model_page(current: ProjectStore) -> None:
         "Reasoning effort",
         reasoning_options,
         index=reasoning_options.index(model.reasoning_effort),
-        help="Low is recommended for faster extraction. Supported values depend on the selected OpenAI model.",
+        help="Low is recommended for faster extraction. Supported values depend on the selected model and provider.",
     )
     timeout = col2.number_input("Timeout seconds", 1.0, 3600.0, model.timeout_seconds)
     if st.button("Save model settings", type="primary"):

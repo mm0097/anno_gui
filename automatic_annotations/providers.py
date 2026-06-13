@@ -237,6 +237,20 @@ class OpenAICompatibleProvider(ExtractionProvider):
 
 
 class HuggingFaceProvider(ExtractionProvider):
+    @staticmethod
+    def _chat_completions_url(api_base: str) -> str:
+        base = api_base.strip().rstrip("/")
+        parsed = urlparse(base)
+        if parsed.hostname == "router.huggingface.co" and "/hf-inference/models" in parsed.path:
+            return "https://router.huggingface.co/v1/chat/completions"
+        if not base:
+            return "https://router.huggingface.co/v1/chat/completions"
+        if base.endswith("/chat/completions"):
+            return base
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
     def extract(
         self,
         text: str,
@@ -246,45 +260,76 @@ class HuggingFaceProvider(ExtractionProvider):
         settings: ModelSettings,
         api_key: str | None = None,
     ) -> ExtractionResponse:
-        key = api_key or os.getenv(settings.api_key_env or "HF_TOKEN")
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        base = settings.api_base.strip() or "https://router.huggingface.co/hf-inference/models"
-        url = base if base.rstrip("/").endswith(settings.model) else f"{base.rstrip('/')}/{settings.model}"
-        prompt = f"{build_prompt(schema, instructions, examples)}\n\nText:\n{text}\n\nJSON:"
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "temperature": settings.temperature,
-                "max_new_tokens": settings.max_output_tokens,
-                "return_full_text": False,
+        key = api_key or os.getenv("HF_TOKEN") or os.getenv(settings.api_key_env)
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        url = self._chat_completions_url(settings.api_base)
+        strict_schema = openai_strict_schema(schema)
+        payload: dict[str, Any] = {
+            "model": settings.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": build_prompt(schema, instructions, examples, include_schema=False),
+                },
+                {"role": "user", "content": text},
+            ],
+            "temperature": settings.temperature,
+            "max_tokens": settings.max_output_tokens,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "annotation",
+                    "schema": strict_schema,
+                    "strict": True,
+                },
             },
         }
+        if settings.reasoning_effort != "default":
+            payload["reasoning_effort"] = settings.reasoning_effort
         started = time.perf_counter()
         try:
-            response = httpx.post(url, headers=headers, json=payload, timeout=settings.timeout_seconds)
+            for _ in range(2):
+                response = httpx.post(
+                    url, headers=headers, json=payload, timeout=settings.timeout_seconds
+                )
+                if response.status_code < 400:
+                    break
+                message, parameter = OpenAICompatibleProvider._error_details(response)
+                if parameter == "reasoning_effort" or (
+                    "reasoning_effort" in message.lower()
+                    and any(word in message.lower() for word in ("unsupported", "support", "unknown"))
+                ):
+                    payload.pop("reasoning_effort", None)
+                    continue
+                break
             response.raise_for_status()
             body = response.json()
-            if isinstance(body, list):
-                raw = body[0].get("generated_text", "")
-            elif isinstance(body, dict):
-                raw = body.get("generated_text") or body.get("text") or json.dumps(body)
-            else:
-                raw = str(body)
+            raw = body["choices"][0]["message"]["content"]
             parsed = parse_json_object(raw)
+            usage = body.get("usage", {})
             return ExtractionResponse(
                 parsed=parsed,
                 raw_output=raw,
+                usage=Usage(
+                    input_tokens=usage.get("prompt_tokens"),
+                    output_tokens=usage.get("completion_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                ),
                 latency_seconds=time.perf_counter() - started,
-                model=settings.model,
-                validation_errors=validation_errors(parsed, schema),
+                model=body.get("model", settings.model),
+                validation_errors=validation_errors(parsed, strict_schema),
             )
         except Exception as exc:
             raw = response.text if "response" in locals() else ""
+            detail = f"{exc}: {raw}" if raw else str(exc)
             return ExtractionResponse(
                 raw_output=raw,
                 latency_seconds=time.perf_counter() - started,
                 model=settings.model,
-                error=str(exc),
+                error=detail,
             )
 
 

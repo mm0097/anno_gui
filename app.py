@@ -10,7 +10,7 @@ import streamlit as st
 
 from automatic_annotations.data import load_huggingface, load_upload
 from automatic_annotations.exports import csv_bytes, export_records, jsonl_bytes, run_bundle_bytes
-from automatic_annotations.graph import build_extracted_graph, graph_exports
+from automatic_annotations.graph import build_extracted_graph, graph_exports, infer_graph_schema, normalize_graph_records
 from automatic_annotations.models import (
     AnnotationField,
     EdgeTypeDefinition,
@@ -407,6 +407,27 @@ def render_graph(graph: Any, warnings: list[str], download: bool = False) -> Non
             column.download_button(filename, content, filename, use_container_width=True)
 
 
+def load_graph_jsonl_upload(uploaded: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    text = uploaded.getvalue().decode("utf-8")
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSONL on line {line_number}: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"Line {line_number} must be a JSON object")
+        records.append(value)
+    if not records:
+        raise ValueError("The uploaded JSONL did not contain any records")
+    normalized = normalize_graph_records(records)
+    if not normalized:
+        raise ValueError("No graph annotations found. Expected nodes/edges directly or under annotation, graph, parsed, or extraction.")
+    return normalized
+
+
 def extract_page(current: ProjectStore) -> None:
     st.header("5. Test & Run")
     config = current.load_config()
@@ -569,23 +590,52 @@ def export_page(current: ProjectStore) -> None:
 
 def graph_page(current: ProjectStore) -> None:
     st.header("7. Graph Visualization")
-    if current.load_config().extraction_mode != "graph":
-        st.info("Graph visualization is available for graph extraction schemas. This project currently uses ordinary annotations.")
-        return
-    runs = current.list_runs()
-    if not runs:
-        st.info("Run an extraction first.")
-        return
-    run_id = st.selectbox("Source run", runs, key="graph_run")
-    records = export_records(current, run_id)
-    reviewed_only = st.checkbox("Reviewed rows only")
-    if reviewed_only:
-        records = [record for record in records if record.get("review_status") == "reviewed"]
-    graph, warnings = build_extracted_graph(
-        records, current.load_graph_schema(), row_id_field=current.load_config().id_column
-    )
-    st.caption("Nodes are deduplicated by exact ID across all selected rows. No fuzzy merging is performed.")
-    render_graph(graph, warnings, download=True)
+    project_tab, upload_tab = st.tabs(["Project run", "External JSONL"])
+    with project_tab:
+        if current.load_config().extraction_mode != "graph":
+            st.info("Graph visualization is available for graph extraction schemas. This project currently uses ordinary annotations.")
+        else:
+            runs = current.list_runs()
+            if not runs:
+                st.info("Run an extraction first.")
+            else:
+                run_id = st.selectbox("Source run", runs, key="graph_run")
+                records = export_records(current, run_id)
+                reviewed_only = st.checkbox("Reviewed rows only")
+                if reviewed_only:
+                    records = [record for record in records if record.get("review_status") == "reviewed"]
+                graph, warnings = build_extracted_graph(
+                    records, current.load_graph_schema(), row_id_field=current.load_config().id_column
+                )
+                st.caption("Nodes are deduplicated by exact ID across all selected rows. No fuzzy merging is performed.")
+                render_graph(graph, warnings, download=True)
+    with upload_tab:
+        uploaded = st.file_uploader("Extraction JSONL", type=["jsonl", "ndjson"], key="graph_jsonl_upload")
+        if not uploaded:
+            st.info("Upload JSONL with nodes and edges directly, or under annotation, graph, parsed, or extraction.")
+            return
+        try:
+            records = load_graph_jsonl_upload(uploaded)
+            definition = infer_graph_schema(records)
+        except Exception as exc:
+            st.error(str(exc))
+            return
+        id_candidates = sorted({
+            key
+            for record in records
+            for key, value in record.items()
+            if key != "annotation" and isinstance(value, (str, int, float))
+        })
+        row_id_options = ["None", *id_candidates]
+        preferred = next((key for key in ("row_id", "_row_id", "doc_id", "id") if key in id_candidates), "None")
+        row_id_field = st.selectbox("Source row ID", row_id_options, index=row_id_options.index(preferred))
+        with st.expander("Inferred graph schema"):
+            st.json(definition.model_dump(mode="json"))
+        graph, warnings = build_extracted_graph(
+            records, definition, row_id_field=None if row_id_field == "None" else row_id_field
+        )
+        st.caption("Types are inferred from uploaded records. Invalid or missing type names are normalized to schema identifiers.")
+        render_graph(graph, warnings, download=True)
 
 
 def main() -> None:
